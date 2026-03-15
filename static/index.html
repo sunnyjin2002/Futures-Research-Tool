@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>期货研究工具</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="background-glow background-glow-left"></div>
+    <div class="background-glow background-glow-right"></div>
+
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Futures Research Portal</p>
+          <h1>期货研究工具</h1>
+        </div>
+        <div class="status-chip">
+          <span class="status-dot"></span>
+          <span>本地服务模式</span>
+        </div>
+      </header>
+
+      <section id="workspace-page" class="workspace-page">
+        <div class="panel panel-form">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">建模工作台</p>
+              <h2>选择研究对象并启动模型</h2>
+            </div>
+          </div>
+
+          <form id="prediction-form" class="form-grid">
+            <label class="field">
+              <span>期货产品</span>
+              <select id="product-select" name="productId" required></select>
+            </label>
+
+            <label class="field">
+              <span>模型</span>
+              <select id="model-select" name="modelId" required></select>
+            </label>
+
+            <div class="field field-summary">
+              <span>说明</span>
+              <p>“期货产品”会同时控制当前页面的建模对象与研究对象。预测结果将写入本地 SQLite，研究区会根据右侧多选参数列表叠加指标和模型输出。</p>
+            </div>
+
+            <button id="run-button" class="primary-button" type="submit">启动预测任务</button>
+          </form>
+        </div>
+
+        <div class="panel panel-status">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">任务状态</p>
+              <h2>模型运行反馈</h2>
+            </div>
+          </div>
+
+          <div id="status-card" class="status-card idle">
+            <p id="status-title" class="status-title">等待启动模型任务</p>
+            <p id="status-detail" class="status-detail">请选择期货产品与模型，然后开始计算。预测完成后可在研究页面查看结果覆盖效果。</p>
+            <div class="status-metrics">
+              <div>
+                <span class="metric-label">当前任务</span>
+                <strong id="task-id">-</strong>
+              </div>
+              <div>
+                <span class="metric-label">创建时间</span>
+                <strong id="created-at">-</strong>
+              </div>
+              <div>
+                <span class="metric-label">运行计时</span>
+                <strong id="timer-display">00:00</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="research-layout">
+        <div class="panel panel-chart">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">研究页面</p>
+              <h2>日线 K 线与预测叠加</h2>
+            </div>
+            <div class="chart-badge" id="chart-badge">等待模型结果</div>
+          </div>
+
+          <div class="chart-stage">
+            <canvas id="candlestick-chart" width="940" height="460" aria-label="K线图"></canvas>
+          </div>
+
+          <div class="chart-footer">
+            <div>
+              <span class="metric-label">当前研究对象</span>
+              <strong id="research-product">-</strong>
+            </div>
+            <div>
+              <span class="metric-label">最近预测时间</span>
+              <strong id="research-time">-</strong>
+            </div>
+            <div>
+              <span class="metric-label">已选模型</span>
+              <strong id="research-model">-</strong>
+            </div>
+          </div>
+        </div>
+
+        <aside class="panel panel-controls">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">参数区</p>
+              <h2>图表参数</h2>
+            </div>
+          </div>
+
+          <p class="control-hint">滚动列表支持多选。技术指标会直接叠加到 K 线图，模型会叠加各自最近一次预测结果。</p>
+
+          <div class="parameter-scroll">
+            <div class="indicator-group">
+              <p class="control-title">技术指标</p>
+              <div id="indicator-list" class="parameter-list"></div>
+            </div>
+
+            <div class="indicator-group">
+              <p class="control-title">预测模型</p>
+              <div id="model-parameter-list" class="parameter-list"></div>
+            </div>
+          </div>
+
+          <button id="refresh-research" class="secondary-button" type="button">刷新研究视图</button>
+        </aside>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
