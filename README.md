@@ -10,11 +10,14 @@ python3 app.py
 
 启动后访问 `http://127.0.0.1:8000`。
 
-如需启用真实数据提取与真实模型计算，建议安装：
+如需安装项目依赖，直接执行：
 
 ```bash
-pip install akshare yfinance pandas statsmodels arch
+pip install -r requirements.txt
 ```
+
+当前环境里已检测到的版本只有 `pandas==2.3.3`。
+`akshare`、`arch`、`statsmodels`、`yfinance` 在这台机器上还未安装，所以 `requirements.txt` 中对它们使用的是兼容下限；等你实际安装并验证后，如果你想，我可以再帮你把它们改成严格锁定版本。
 
 ## 当前功能
 

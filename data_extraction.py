@@ -1,23 +1,17 @@
 from __future__ import annotations
 
+import functools
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
 
-PRODUCT_SOURCE_CONFIG = {
-    "SHFE-CU": {"akshare_symbol": "CU0", "yahoo_symbol": "HG=F"},
-    "SHFE-AL": {"akshare_symbol": "AL0"},
-    "SHFE-AU": {"akshare_symbol": "AU0", "yahoo_symbol": "GC=F"},
-    "SHFE-AG": {"akshare_symbol": "AG0", "yahoo_symbol": "SI=F"},
-    "INE-SC": {"akshare_symbol": "SC0", "yahoo_symbol": "CL=F"},
-    "DCE-I": {"akshare_symbol": "I0"},
-    "DCE-M": {"akshare_symbol": "M0"},
-    "DCE-Y": {"akshare_symbol": "Y0"},
-    "CZCE-TA": {"akshare_symbol": "TA0"},
-    "CZCE-MA": {"akshare_symbol": "MA0"},
-    "CFFEX-IF": {"akshare_symbol": "IF0"},
+MANUAL_SOURCE_CONFIG = {
+    "SHFE-CU": {"yahoo_symbol": "HG=F"},
+    "SHFE-AU": {"yahoo_symbol": "GC=F"},
+    "SHFE-AG": {"yahoo_symbol": "SI=F"},
+    "INE-SC": {"yahoo_symbol": "CL=F"},
 }
 
 
@@ -145,7 +139,7 @@ def upsert_market_data(
 def refresh_market_data_if_needed(
     db_path: Union[Path, str],
     futures_id: str,
-    lookback_days: int = 180,
+    lookback_days: int = 365,
 ) -> list[dict]:
     latest_date = get_latest_market_date(db_path, futures_id)
     today = date.today().isoformat()
@@ -160,10 +154,15 @@ def refresh_market_data_if_needed(
 def extract_and_store_daily_data(
     db_path: Union[Path, str],
     futures_id: str,
-    lookback_days: int = 180,
+    lookback_days: int = 365,
 ) -> list[dict]:
-    source_config = PRODUCT_SOURCE_CONFIG.get(futures_id, {})
-    akshare_bars = fetch_from_akshare(source_config.get("akshare_symbol"), lookback_days)
+    source_config = resolve_source_config(futures_id)
+    akshare_bars = fetch_from_akshare(
+        futures_id=futures_id,
+        exchange=source_config["exchange"],
+        code=source_config["code"],
+        lookback_days=lookback_days,
+    )
     if akshare_bars:
         upsert_market_data(db_path, futures_id, akshare_bars, source="akshare")
 
@@ -171,31 +170,107 @@ def extract_and_store_daily_data(
     if yahoo_bars:
         upsert_market_data(db_path, futures_id, yahoo_bars, source="yahoo_finance")
 
-    return load_daily_bars(db_path=db_path, futures_id=futures_id, limit=lookback_days)
+    bars = load_daily_bars(db_path=db_path, futures_id=futures_id, limit=lookback_days)
+    if not bars:
+        raise ValueError(f"未能抓取 {futures_id} 的行情数据，请检查 AkShare/Yahoo Finance 代码映射或网络。")
+    return bars
 
 
-def fetch_from_akshare(symbol: Optional[str], lookback_days: int) -> list[dict]:
-    if not symbol:
-        return []
+def resolve_source_config(futures_id: str) -> dict:
+    exchange, code = split_futures_id(futures_id)
+    manual = MANUAL_SOURCE_CONFIG.get(futures_id, {})
+    return {
+        "exchange": exchange,
+        "code": code,
+        "yahoo_symbol": manual.get("yahoo_symbol"),
+    }
 
+
+def split_futures_id(futures_id: str) -> tuple[str, str]:
+    if "-" in futures_id:
+        exchange, code = futures_id.split("-", 1)
+        return exchange.upper(), code.upper()
+    return "", futures_id.upper()
+
+
+@functools.lru_cache(maxsize=1)
+def get_akshare_main_contract_map() -> dict:
+    try:
+        import akshare as ak
+    except Exception:
+        return {}
+
+    try:
+        data_frame = ak.futures_display_main_sina()
+    except Exception:
+        return {}
+
+    if data_frame is None or data_frame.empty:
+        return {}
+
+    symbol_map = {}
+    for _, row in data_frame.iterrows():
+        symbol = str(row.get("symbol", "")).strip()
+        exchange = str(row.get("exchange", "")).strip().upper()
+        name = str(row.get("name", "")).strip()
+        if not symbol:
+            continue
+
+        base_code = extract_base_code_from_symbol(symbol)
+        symbol_map[(exchange, base_code)] = {
+            "symbol": symbol,
+            "exchange": exchange,
+            "name": name,
+        }
+    return symbol_map
+
+
+def extract_base_code_from_symbol(symbol: str) -> str:
+    normalized = str(symbol).strip().upper()
+    while normalized and normalized[-1].isdigit():
+        normalized = normalized[:-1]
+    return normalized
+
+
+def map_exchange_for_akshare(exchange: str) -> str:
+    mapping = {
+        "SHFE": "SHFE",
+        "INE": "INE",
+        "DCE": "DCE",
+        "CZCE": "CZCE",
+        "CFFEX": "CFFEX",
+        "GFEX": "GFEX",
+    }
+    return mapping.get(exchange.upper(), exchange.upper())
+
+
+def fetch_from_akshare(
+    futures_id: str,
+    exchange: str,
+    code: str,
+    lookback_days: int,
+) -> list[dict]:
     try:
         import akshare as ak
     except Exception:
         return []
 
-    data_frame = None
-    candidates = [
-        lambda: ak.futures_zh_daily_sina(symbol=symbol),
-        lambda: ak.get_futures_daily(start_date=None, end_date=None, market=symbol),
-    ]
+    symbol_map = get_akshare_main_contract_map()
+    lookup_key = (map_exchange_for_akshare(exchange), code.upper())
+    symbol_entry = symbol_map.get(lookup_key)
+    symbol = symbol_entry["symbol"] if symbol_entry else f"{code.upper()}0"
 
-    for loader in candidates:
-        try:
-            data_frame = loader()
-            if data_frame is not None and not data_frame.empty:
-                break
-        except Exception:
-            continue
+    end_dt = date.today()
+    start_dt = date.fromordinal(end_dt.toordinal() - lookback_days)
+
+    try:
+        data_frame = ak.futures_main_sina(
+            symbol=symbol,
+            start_date=start_dt.strftime("%Y%m%d"),
+            end_date=end_dt.strftime("%Y%m%d"),
+        )
+    except Exception:
+        return []
 
     if data_frame is None or data_frame.empty:
         return []
@@ -204,17 +279,12 @@ def fetch_from_akshare(symbol: Optional[str], lookback_days: int) -> list[dict]:
     for _, row in data_frame.tail(lookback_days).iterrows():
         records.append(
             {
-                "date": normalize_trade_date(
-                    row.get("date")
-                    or row.get("日期")
-                    or row.get("trade_date")
-                    or row.get("交易日期")
-                ),
-                "open": row.get("open") or row.get("开盘价") or row.get("开盘"),
-                "high": row.get("high") or row.get("最高价") or row.get("最高"),
-                "low": row.get("low") or row.get("最低价") or row.get("最低"),
-                "close": row.get("close") or row.get("收盘价") or row.get("收盘"),
-                "volume": row.get("volume") or row.get("成交量"),
+                "date": normalize_trade_date(row.get("日期") or row.get("date")),
+                "open": row.get("开盘价") or row.get("open"),
+                "high": row.get("最高价") or row.get("high"),
+                "low": row.get("最低价") or row.get("low"),
+                "close": row.get("收盘价") or row.get("close"),
+                "volume": row.get("成交量") or row.get("volume"),
             }
         )
     return [bar for bar in records if is_complete_bar(bar)]

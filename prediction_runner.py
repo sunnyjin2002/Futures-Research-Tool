@@ -26,7 +26,7 @@ class PredictionRunner:
         model_id: str,
     ) -> dict:
         ensure_market_data_table(self.db_path)
-        market_data = refresh_market_data_if_needed(self.db_path, futures_id, lookback_days=240)
+        market_data = refresh_market_data_if_needed(self.db_path, futures_id, lookback_days=365)
         if len(market_data) < 10:
             raise ValueError(f"{futures_name} 的历史日线数据不足，暂时无法运行 {model_id} 模型。")
 

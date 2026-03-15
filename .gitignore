@@ -1,4 +1,17 @@
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# Python cache and compiled files
 __pycache__/
 *.pyc
 .DS_Store
 data/
+
+# PyCharm
+.idea/
+
+# VSCode
+.vscode/
