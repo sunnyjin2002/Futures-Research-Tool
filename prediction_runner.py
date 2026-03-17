@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Union
 
 from data_extraction import ensure_market_data_table, refresh_market_data_if_needed
-from models import ARIMAPredictor, GARCHPredictor
+from models import ARIMAPredictor, GARCHPredictor, MultiModelIntegratedPredictor
 
 
 @dataclass
@@ -34,7 +34,10 @@ class PredictionRunner:
         model = self._build_model(model_id)
 
         started_at = time.time()
-        predicted_prices = model.predict(closes)
+        if hasattr(model, "predict_from_bars"):
+            predicted_prices = model.predict_from_bars(market_data)
+        else:
+            predicted_prices = model.predict(closes)
         runtime_seconds = round(time.time() - started_at, 2)
 
         last_date = market_data[-1]["date"]
@@ -64,6 +67,8 @@ class PredictionRunner:
             return ARIMAPredictor(horizon=self.horizon)
         if model_id == "garch":
             return GARCHPredictor(horizon=self.horizon)
+        if model_id == "multi_model_system":
+            return MultiModelIntegratedPredictor(horizon=self.horizon)
         raise ValueError(f"尚未实现模型：{model_id}")
 
 

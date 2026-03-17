@@ -109,6 +109,7 @@ for product in FUTURES_PRODUCTS:
 MODELS = [
     {"id": "arima", "label": "ARIMA 基线模型"},
     {"id": "garch", "label": "GARCH 波动率模型"},
+    {"id": "multi_model_system", "label": "多模型综合系统"},
 ]
 
 INDICATORS = [
