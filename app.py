@@ -1,15 +1,15 @@
 import json
 import math
-import random
 import sqlite3
 import threading
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
-from data_extraction import ensure_market_data_table, load_daily_bars
+from data_extraction import ensure_market_data_table, load_daily_bars, refresh_market_data_if_needed
 from prediction_runner import run_prediction_job_for_record
 
 
@@ -226,6 +226,88 @@ def serialize_prediction(row: sqlite3.Row) -> dict:
         "errorMessage": row["error_message"],
     }
 
+
+def serialize_market_row(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "futuresId": row["futures_id"],
+        "tradingDate": row["trading_date"],
+        "openPrice": row["open_price"],
+        "highPrice": row["high_price"],
+        "lowPrice": row["low_price"],
+        "closePrice": row["close_price"],
+        "volume": row["volume"],
+        "source": row["source"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def get_database_snapshot(limit: Optional[int] = 100) -> dict:
+    with get_connection() as conn:
+        prediction_query = """
+            SELECT * FROM predictions
+            ORDER BY id DESC
+        """
+        market_query = """
+            SELECT * FROM market_data
+            ORDER BY trading_date DESC, id DESC
+        """
+
+        prediction_rows = conn.execute(
+            prediction_query if limit is None else f"{prediction_query}\nLIMIT ?",
+            () if limit is None else (limit,),
+        ).fetchall()
+        prediction_count = conn.execute("SELECT COUNT(*) AS count FROM predictions").fetchone()["count"]
+
+        market_rows = conn.execute(
+            market_query if limit is None else f"{market_query}\nLIMIT ?",
+            () if limit is None else (limit,),
+        ).fetchall()
+        market_count = conn.execute("SELECT COUNT(*) AS count FROM market_data").fetchone()["count"]
+
+    return {
+        "predictions": {
+            "count": prediction_count,
+            "rows": [serialize_prediction(row) for row in prediction_rows],
+        },
+        "marketData": {
+            "count": market_count,
+            "rows": [serialize_market_row(row) for row in market_rows],
+        },
+    }
+
+
+def delete_database_rows(payload: dict) -> dict:
+    prediction_ids = [int(item) for item in payload.get("predictionIds", [])]
+    market_data_ids = [int(item) for item in payload.get("marketDataIds", [])]
+
+    deleted_predictions = 0
+    deleted_market_data = 0
+
+    with get_connection() as conn:
+        if prediction_ids:
+            placeholders = ", ".join("?" for _ in prediction_ids)
+            cursor = conn.execute(
+                f"DELETE FROM predictions WHERE id IN ({placeholders})",
+                prediction_ids,
+            )
+            deleted_predictions = cursor.rowcount
+
+        if market_data_ids:
+            placeholders = ", ".join("?" for _ in market_data_ids)
+            cursor = conn.execute(
+                f"DELETE FROM market_data WHERE id IN ({placeholders})",
+                market_data_ids,
+            )
+            deleted_market_data = cursor.rowcount
+
+        conn.commit()
+
+    return {
+        "deletedPredictions": deleted_predictions,
+        "deletedMarketData": deleted_market_data,
+    }
+
 def run_prediction_job(prediction_id: int) -> None:
     run_prediction_job_for_record(DB_PATH, prediction_id)
 
@@ -303,9 +385,12 @@ def build_model_statuses(product_id: str) -> list:
 
 
 def build_market_series(product_id: str) -> dict:
-    cached_bars = load_daily_bars(DB_PATH, product_id, limit=60)
+    try:
+        cached_bars = refresh_market_data_if_needed(DB_PATH, product_id, lookback_days=365)
+    except Exception:
+        cached_bars = load_daily_bars(DB_PATH, product_id, limit=365)
+
     if cached_bars:
-        closes = [round(bar["close"], 2) for bar in cached_bars]
         candles = [
             {
                 "label": bar["date"],
@@ -315,7 +400,7 @@ def build_market_series(product_id: str) -> dict:
                 "close": round(bar["close"], 2),
                 "volume": int(bar["volume"] or 0),
             }
-            for bar in cached_bars[-30:]
+            for bar in cached_bars
         ]
         visible_closes = [item["close"] for item in candles]
         return {
@@ -328,39 +413,13 @@ def build_market_series(product_id: str) -> dict:
             },
         }
 
-    seed = sum(ord(char) for char in product_id)
-    rng = random.Random(seed)
-    base = 120 + (seed % 35)
-    candles = []
-    closes = []
-
-    for day in range(30):
-        trend = math.sin(day / 4.5) * 3.5
-        open_price = base + trend + rng.uniform(-3, 3)
-        close_price = open_price + rng.uniform(-4.5, 4.5)
-        high_price = max(open_price, close_price) + rng.uniform(0.8, 3.2)
-        low_price = min(open_price, close_price) - rng.uniform(0.8, 3.2)
-        volume = int(1000 + rng.uniform(0, 1200) + day * 18)
-        candles.append(
-            {
-                "label": f"第{day + 1}日",
-                "open": round(open_price, 2),
-                "high": round(high_price, 2),
-                "low": round(low_price, 2),
-                "close": round(close_price, 2),
-                "volume": volume,
-            }
-        )
-        closes.append(round(close_price, 2))
-        base = close_price
-
     return {
-        "candles": candles,
+        "candles": [],
         "indicators": {
-            "ma5": moving_average(closes, 5),
-            "ma10": moving_average(closes, 10),
-            "ma20": moving_average(closes, 20),
-            "boll": build_bollinger_bands(closes, 20, 2.0),
+            "ma5": [],
+            "ma10": [],
+            "ma20": [],
+            "boll": {"middle": [], "upper": [], "lower": []},
         },
     }
 
@@ -426,10 +485,20 @@ class FuturesResearchHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/database":
+            json_response(self, get_database_snapshot(limit=None))
+            return
+
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+
+        if parsed.path == "/api/database/delete":
+            body = parse_json_body(self)
+            result = delete_database_rows(body)
+            json_response(self, result)
+            return
 
         if parsed.path != "/api/predictions":
             self.send_error(HTTPStatus.NOT_FOUND)

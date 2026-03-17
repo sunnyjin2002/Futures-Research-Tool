@@ -15,7 +15,7 @@ from models import ARIMAPredictor, GARCHPredictor
 @dataclass
 class PredictionRunner:
     db_path: Path
-    horizon: int = 5
+    horizon: int = 30
 
     def run(
         self,

@@ -7,9 +7,17 @@ const state = {
   timerStart: null,
   selectedIndicators: new Set(),
   selectedModelIds: new Set(),
+  zoomDays: 30,
+  databaseEditMode: false,
+  databaseSelection: {
+    predictions: new Set(),
+    marketData: new Set(),
+  },
 };
 
 const els = {
+  tabs: Array.from(document.querySelectorAll(".tab")),
+  tabPages: Array.from(document.querySelectorAll(".tab-page")),
   form: document.getElementById("prediction-form"),
   productSelect: document.getElementById("product-select"),
   modelSelect: document.getElementById("model-select"),
@@ -23,12 +31,41 @@ const els = {
   indicatorList: document.getElementById("indicator-list"),
   modelParameterList: document.getElementById("model-parameter-list"),
   refreshResearch: document.getElementById("refresh-research"),
+  chartStage: document.querySelector(".chart-stage"),
   chartCanvas: document.getElementById("candlestick-chart"),
+  zoomRange: document.getElementById("zoom-range"),
+  zoomValue: document.getElementById("zoom-value"),
+  chartLegend: document.getElementById("chart-legend"),
   chartBadge: document.getElementById("chart-badge"),
   researchProduct: document.getElementById("research-product"),
   researchTime: document.getElementById("research-time"),
   researchModel: document.getElementById("research-model"),
+  forecastTableBody: document.getElementById("forecast-table-body"),
+  predictionsCount: document.getElementById("predictions-count"),
+  marketDataCount: document.getElementById("marketdata-count"),
+  predictionsTableBody: document.getElementById("predictions-table-body"),
+  marketDataTableBody: document.getElementById("marketdata-table-body"),
+  editDatabase: document.getElementById("edit-database"),
+  cancelDatabase: document.getElementById("cancel-database"),
+  deleteDatabase: document.getElementById("delete-database"),
+  databaseSelectionSummary: document.getElementById("database-selection-summary"),
+  refreshDatabase: document.getElementById("refresh-database"),
 };
+
+const chartColors = {
+  ma5: "#d19c34",
+  ma10: "#3667b2",
+  ma20: "#7b59a3",
+  bollUpper: "#bf8b2d",
+  bollMiddle: "#8e66b7",
+  bollLower: "#bf8b2d",
+  arima: "#d9485f",
+  garch: "#2a76c9",
+};
+
+const MIN_ZOOM_DAYS = 30;
+const MAX_ZOOM_DAYS = 365;
+const ZOOM_STEP = 5;
 
 function formatElapsed(seconds) {
   const mins = String(Math.floor(seconds / 60)).padStart(2, "0");
@@ -52,6 +89,31 @@ function populateSelect(selectEl, items, labelFn, valueKey) {
 
 function formatUpdateTime(value) {
   return value || "尚无结果";
+}
+
+function clampZoomDays(value) {
+  return Math.max(MIN_ZOOM_DAYS, Math.min(MAX_ZOOM_DAYS, value));
+}
+
+function updateZoomUI() {
+  els.zoomRange.value = String(state.zoomDays);
+  els.zoomValue.textContent = `${state.zoomDays} 天`;
+}
+
+function formatAxisLabel(label) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(label)) {
+    return label.slice(5);
+  }
+  return label;
+}
+
+function setActiveTab(targetId) {
+  els.tabs.forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.tabTarget === targetId);
+  });
+  els.tabPages.forEach((page) => {
+    page.classList.toggle("is-active", page.id === targetId);
+  });
 }
 
 function renderIndicators(indicators) {
@@ -339,11 +401,341 @@ function buildPredictionSeries(dataset) {
     .map((item) => item.prediction);
 }
 
+function getVisibleMarket(dataset) {
+  const windowSize = clampZoomDays(state.zoomDays);
+  const candles = dataset.market.candles.slice(-windowSize);
+  const startIndex = dataset.market.candles.length - candles.length;
+  const indicators = {
+    ma5: dataset.market.indicators.ma5.slice(startIndex),
+    ma10: dataset.market.indicators.ma10.slice(startIndex),
+    ma20: dataset.market.indicators.ma20.slice(startIndex),
+    boll: {
+      upper: dataset.market.indicators.boll.upper.slice(startIndex),
+      middle: dataset.market.indicators.boll.middle.slice(startIndex),
+      lower: dataset.market.indicators.boll.lower.slice(startIndex),
+    },
+  };
+  return { candles, indicators };
+}
+
+function renderLegend(dataset, predictionSeries) {
+  els.chartLegend.innerHTML = "";
+  const items = [
+    { label: "阳线", color: "#e16a65", swatchClass: "candle-up" },
+    { label: "阴线", color: "#3f9965", swatchClass: "candle-down" },
+  ];
+
+  if (state.selectedIndicators.has("ma5")) {
+    items.push({ label: "MA5", color: chartColors.ma5 });
+  }
+  if (state.selectedIndicators.has("ma10")) {
+    items.push({ label: "MA10", color: chartColors.ma10 });
+  }
+  if (state.selectedIndicators.has("ma20")) {
+    items.push({ label: "MA20", color: chartColors.ma20 });
+  }
+  if (state.selectedIndicators.has("boll")) {
+    items.push({ label: "布林带", color: chartColors.bollUpper, dashed: true });
+  }
+
+  predictionSeries.forEach((prediction) => {
+    items.push({
+      label: `${prediction.modelLabel} 预测`,
+      color: chartColors[prediction.modelId] || "#d9485f",
+      dashed: true,
+    });
+  });
+
+  items.forEach((item) => {
+    const legend = document.createElement("div");
+    legend.className = "legend-item";
+    const swatch = document.createElement("span");
+    swatch.className = `legend-swatch${item.swatchClass ? ` ${item.swatchClass}` : ""}${item.dashed ? " dashed" : ""}`;
+    swatch.style.color = item.color;
+    if (!item.swatchClass) {
+      swatch.style.borderTopColor = item.color;
+    }
+    legend.appendChild(swatch);
+    const label = document.createElement("span");
+    label.textContent = item.label;
+    legend.appendChild(label);
+    els.chartLegend.appendChild(legend);
+  });
+}
+
+function buildForecastSummaryRows(dataset) {
+  const latestClose = dataset.market.candles.length
+    ? dataset.market.candles[dataset.market.candles.length - 1].close
+    : null;
+  const checkpoints = [5, 10, 20, 30];
+  return dataset.modelStatuses.map((modelStatus) => {
+    const prediction = modelStatus.prediction;
+    const summary = {};
+
+    checkpoints.forEach((day) => {
+      const point = prediction?.predictionPayload?.find((item) => item.dayOffset === day);
+      if (!point || latestClose === null) {
+        summary[day] = null;
+        return;
+      }
+      const changePercent = ((point.price - latestClose) / latestClose) * 100;
+      summary[day] = {
+        price: Number(point.price),
+        changePercent,
+      };
+    });
+
+    return {
+      modelLabel: modelStatus.label,
+      summary,
+    };
+  });
+}
+
+function renderForecastTable(dataset) {
+  const rows = buildForecastSummaryRows(dataset);
+  els.forecastTableBody.innerHTML = "";
+
+  rows.forEach((row) => {
+    const tr = document.createElement("tr");
+
+    const nameCell = document.createElement("td");
+    nameCell.className = "forecast-model-name";
+    nameCell.textContent = row.modelLabel;
+    tr.appendChild(nameCell);
+
+    [5, 10, 20, 30].forEach((day) => {
+      const td = document.createElement("td");
+      const value = row.summary[day];
+
+      if (!value) {
+        td.className = "forecast-empty";
+        td.textContent = "";
+        tr.appendChild(td);
+        return;
+      }
+
+      const wrapper = document.createElement("div");
+      wrapper.className = "forecast-cell";
+
+      const price = document.createElement("span");
+      price.className = "forecast-price";
+      price.textContent = `${value.price.toFixed(2)}`;
+      wrapper.appendChild(price);
+
+      const change = document.createElement("span");
+      const directionClass =
+        value.changePercent > 0 ? " is-up" : value.changePercent < 0 ? " is-down" : "";
+      change.className = `forecast-change${directionClass}`;
+      const sign = value.changePercent > 0 ? "+" : "";
+      change.textContent = `${sign}${value.changePercent.toFixed(2)}%`;
+      wrapper.appendChild(change);
+
+      td.appendChild(wrapper);
+      tr.appendChild(td);
+    });
+
+    els.forecastTableBody.appendChild(tr);
+  });
+}
+
+function renderDatabaseTableRows(tbody, rows, renderer) {
+  tbody.innerHTML = "";
+  rows.forEach((row) => {
+    const tr = document.createElement("tr");
+    renderer(tr, row);
+    tbody.appendChild(tr);
+  });
+}
+
+function appendTextCell(tr, text) {
+  const td = document.createElement("td");
+  td.textContent = text;
+  tr.appendChild(td);
+}
+
+function createSelectionCell(tableKey, rowId) {
+  const td = document.createElement("td");
+  td.className = "db-select-cell";
+
+  if (!state.databaseEditMode) {
+    td.textContent = "";
+    return td;
+  }
+
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = state.databaseSelection[tableKey].has(rowId);
+  input.addEventListener("change", () => {
+    if (input.checked) {
+      state.databaseSelection[tableKey].add(rowId);
+    } else {
+      state.databaseSelection[tableKey].delete(rowId);
+    }
+    updateDatabaseToolbar();
+    input.closest("tr")?.classList.toggle("is-selected", input.checked);
+  });
+  td.appendChild(input);
+  return td;
+}
+
+function updateDatabaseToolbar() {
+  const predictionCount = state.databaseSelection.predictions.size;
+  const marketDataCount = state.databaseSelection.marketData.size;
+  const total = predictionCount + marketDataCount;
+
+  if (!state.databaseEditMode) {
+    els.databaseSelectionSummary.textContent = "当前为浏览模式";
+    els.editDatabase.hidden = false;
+    els.cancelDatabase.hidden = true;
+    els.deleteDatabase.hidden = true;
+    els.deleteDatabase.disabled = true;
+    return;
+  }
+
+  els.databaseSelectionSummary.textContent =
+    total > 0
+      ? `已选择 ${total} 条记录，其中预测 ${predictionCount} 条，行情 ${marketDataCount} 条`
+      : "编辑模式已开启，请勾选要删除的数据";
+  els.editDatabase.hidden = true;
+  els.cancelDatabase.hidden = false;
+  els.deleteDatabase.hidden = false;
+  els.deleteDatabase.disabled = total === 0;
+}
+
+function setDatabaseMessage(message) {
+  els.databaseSelectionSummary.textContent = message;
+}
+
+function clearDatabaseSelection() {
+  state.databaseSelection.predictions.clear();
+  state.databaseSelection.marketData.clear();
+}
+
+function setDatabaseEditMode(enabled) {
+  state.databaseEditMode = enabled;
+  if (!enabled) {
+    clearDatabaseSelection();
+  }
+  updateDatabaseToolbar();
+}
+
+function renderDatabaseSnapshot(snapshot) {
+  els.predictionsCount.textContent = `${snapshot.predictions.count} 条`;
+  els.marketDataCount.textContent = `${snapshot.marketData.count} 条`;
+
+  renderDatabaseTableRows(els.predictionsTableBody, snapshot.predictions.rows, (tr, row) => {
+    const rowId = Number(row.id);
+    tr.classList.toggle("is-selected", state.databaseSelection.predictions.has(rowId));
+    tr.appendChild(createSelectionCell("predictions", rowId));
+    appendTextCell(tr, String(row.id));
+    appendTextCell(tr, `${row.futuresName} (${row.futuresCode})`);
+    appendTextCell(tr, row.modelLabel);
+    appendTextCell(tr, row.status);
+    appendTextCell(tr, row.createdAt || "-");
+    appendTextCell(tr, row.completedAt || "-");
+    appendTextCell(tr, row.runtimeSeconds == null ? "-" : `${Number(row.runtimeSeconds).toFixed(2)} 秒`);
+  });
+
+  renderDatabaseTableRows(els.marketDataTableBody, snapshot.marketData.rows, (tr, row) => {
+    const rowId = Number(row.id);
+    tr.classList.toggle("is-selected", state.databaseSelection.marketData.has(rowId));
+    tr.appendChild(createSelectionCell("marketData", rowId));
+    appendTextCell(tr, String(row.id));
+    appendTextCell(tr, row.futuresId);
+    appendTextCell(tr, row.tradingDate);
+    appendTextCell(tr, row.openPrice == null ? "-" : Number(row.openPrice).toFixed(2));
+    appendTextCell(tr, row.highPrice == null ? "-" : Number(row.highPrice).toFixed(2));
+    appendTextCell(tr, row.lowPrice == null ? "-" : Number(row.lowPrice).toFixed(2));
+    appendTextCell(tr, row.closePrice == null ? "-" : Number(row.closePrice).toFixed(2));
+    appendTextCell(tr, row.source || "-");
+  });
+
+  updateDatabaseToolbar();
+}
+
+async function loadDatabaseSnapshot() {
+  const snapshot = await fetchJSON("/api/database");
+  renderDatabaseSnapshot(snapshot);
+}
+
+async function deleteSelectedDatabaseRows() {
+  const predictionIds = [...state.databaseSelection.predictions];
+  const marketDataIds = [...state.databaseSelection.marketData];
+  const total = predictionIds.length + marketDataIds.length;
+
+  if (total === 0) {
+    return;
+  }
+
+  const confirmed = window.confirm(`确定删除已选中的 ${total} 条数据库记录吗？此操作不可撤销。`);
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    const result = await fetchJSON("/api/database/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        predictionIds,
+        marketDataIds,
+      }),
+    });
+
+    setDatabaseEditMode(false);
+    await loadDatabaseSnapshot();
+
+    const deletedTotal = Number(result.deletedPredictions || 0) + Number(result.deletedMarketData || 0);
+    setDatabaseMessage(`已删除 ${deletedTotal} 条记录。`);
+  } catch (error) {
+    setDatabaseMessage(`删除失败：${error.message}`);
+    throw error;
+  }
+}
+
+function isDatabaseTabActive() {
+  return document.getElementById("tab-database")?.classList.contains("is-active");
+}
+
+function handleDatabaseKeydown(event) {
+  if (!state.databaseEditMode || !isDatabaseTabActive()) {
+    return;
+  }
+
+  const target = event.target;
+  const tagName = target?.tagName?.toLowerCase?.() || "";
+  if (tagName === "input" || tagName === "textarea" || target?.isContentEditable) {
+    return;
+  }
+
+  if (event.key === "Delete" || event.key === "Backspace") {
+    const hasSelection =
+      state.databaseSelection.predictions.size > 0 || state.databaseSelection.marketData.size > 0;
+    if (!hasSelection) {
+      return;
+    }
+    event.preventDefault();
+    deleteSelectedDatabaseRows().catch(() => {});
+  }
+}
+
 function drawChart(dataset) {
   const canvas = els.chartCanvas;
   const ctx = canvas.getContext("2d");
-  const { candles, indicators } = dataset.market;
+  const { candles, indicators } = getVisibleMarket(dataset);
   const predictionSeries = buildPredictionSeries(dataset);
+  renderLegend(dataset, predictionSeries);
+
+  const width = canvas.width;
+  const height = canvas.height;
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#f9fbf8";
+  ctx.fillRect(0, 0, width, height);
+
+  if (candles.length === 0) {
+    return;
+  }
 
   const allPrices = candles.flatMap((item) => [item.high, item.low]);
   predictionSeries.forEach((prediction) => {
@@ -351,8 +743,6 @@ function drawChart(dataset) {
   });
   const { min, max } = calcMinMax(allPrices);
 
-  const width = canvas.width;
-  const height = canvas.height;
   const padding = { top: 28, right: 38, bottom: 50, left: 30 };
   const chartLeft = padding.left;
   const chartRight = width - padding.right;
@@ -365,11 +755,6 @@ function drawChart(dataset) {
   );
   const step = candleAreaWidth / (candles.length + maxPredictionLength + 2);
   const candleWidth = Math.max(8, step * 0.56);
-
-  ctx.clearRect(0, 0, width, height);
-
-  ctx.fillStyle = "#f9fbf8";
-  ctx.fillRect(0, 0, width, height);
 
   ctx.strokeStyle = "rgba(29, 107, 87, 0.10)";
   ctx.lineWidth = 1;
@@ -429,8 +814,8 @@ function drawChart(dataset) {
   }
 
   const predictionColors = {
-    arima: "#d9485f",
-    garch: "#2a76c9",
+    arima: chartColors.arima,
+    garch: chartColors.garch,
   };
 
   predictionSeries.forEach((prediction) => {
@@ -453,9 +838,11 @@ function drawChart(dataset) {
 
   ctx.fillStyle = "#5f7167";
   ctx.font = '12px "PingFang SC", sans-serif';
-  for (let i = 0; i < candles.length; i += 6) {
+  const labelInterval = Math.max(1, Math.ceil(candles.length / 8));
+  for (let i = 0; i < candles.length; i += labelInterval) {
     const x = chartLeft + step * (i + 1);
-    ctx.fillText(candles[i].label, x - 14, height - 20);
+    const label = formatAxisLabel(candles[i].label);
+    ctx.fillText(label, x - 18, height - 20);
   }
 
   if (predictionSeries.length > 0) {
@@ -472,10 +859,14 @@ function updateResearchSummary(data) {
   const latestSelected = [...selectedPredictions].sort((a, b) => {
     return (b.completedAt || b.createdAt).localeCompare(a.completedAt || a.createdAt);
   })[0];
+  const hasMarketData = data.market.candles.length > 0;
 
   els.researchProduct.textContent = selectedProduct ? productLabel(selectedProduct) : data.productId;
 
-  if (latestSelected) {
+  if (!hasMarketData) {
+    els.chartBadge.textContent = "暂无本地行情数据";
+    els.researchTime.textContent = "-";
+  } else if (latestSelected) {
     els.chartBadge.textContent = "已按多选参数叠加研究结果";
     els.researchTime.textContent = latestSelected.completedAt || latestSelected.createdAt;
   } else if (data.latestPrediction) {
@@ -501,6 +892,7 @@ async function loadResearch(forceProductId = null) {
   const data = await fetchJSON(`/api/research?product=${encodeURIComponent(productId)}`);
   state.researchData = data;
   renderModelParameters(data.modelStatuses);
+  renderForecastTable(data);
   drawChart(data);
   updateResearchSummary(data);
 }
@@ -512,12 +904,56 @@ async function init() {
   populateSelect(els.productSelect, data.products, productLabel, "id");
   populateSelect(els.modelSelect, data.models, (model) => model.label, "id");
   renderIndicators(data.indicators);
+  updateZoomUI();
 
+  els.tabs.forEach((tab) => {
+    tab.addEventListener("click", async () => {
+      setActiveTab(tab.dataset.tabTarget);
+      if (tab.dataset.tabTarget === "tab-database") {
+        await loadDatabaseSnapshot();
+      }
+    });
+  });
   els.form.addEventListener("submit", startPrediction);
   els.refreshResearch.addEventListener("click", () => loadResearch());
+  els.refreshDatabase.addEventListener("click", () => loadDatabaseSnapshot());
+  els.editDatabase.addEventListener("click", async () => {
+    setDatabaseEditMode(true);
+    await loadDatabaseSnapshot();
+  });
+  els.cancelDatabase.addEventListener("click", async () => {
+    setDatabaseEditMode(false);
+    await loadDatabaseSnapshot();
+  });
+  els.deleteDatabase.addEventListener("click", async () => {
+    await deleteSelectedDatabaseRows();
+  });
+  window.addEventListener("keydown", handleDatabaseKeydown);
   els.productSelect.addEventListener("change", () => loadResearch(els.productSelect.value));
+  els.zoomRange.addEventListener("input", () => {
+    state.zoomDays = clampZoomDays(Number(els.zoomRange.value));
+    updateZoomUI();
+    if (state.researchData) {
+      drawChart(state.researchData);
+    }
+  });
+  els.chartStage.addEventListener(
+    "wheel",
+    (event) => {
+      if (!state.researchData) {
+        return;
+      }
+      event.preventDefault();
+      const direction = event.deltaY > 0 ? 1 : -1;
+      state.zoomDays = clampZoomDays(state.zoomDays + direction * ZOOM_STEP);
+      updateZoomUI();
+      drawChart(state.researchData);
+    },
+    { passive: false },
+  );
 
   await loadResearch();
+  updateDatabaseToolbar();
 }
 
 init().catch((error) => {

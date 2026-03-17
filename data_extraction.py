@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import functools
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
@@ -57,6 +57,28 @@ def get_latest_market_date(db_path: Union[Path, str], futures_id: str) -> Option
             (futures_id,),
         ).fetchone()
     return row["trading_date"] if row else None
+
+
+def get_market_date_bounds(db_path: Union[Path, str], futures_id: str) -> dict:
+    ensure_market_data_table(db_path)
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT
+                MIN(trading_date) AS earliest_date,
+                MAX(trading_date) AS latest_date,
+                COUNT(*) AS row_count
+            FROM market_data
+            WHERE futures_id = ?
+            """,
+            (futures_id,),
+        ).fetchone()
+
+    return {
+        "earliest_date": row["earliest_date"] if row else None,
+        "latest_date": row["latest_date"] if row else None,
+        "row_count": int(row["row_count"]) if row and row["row_count"] is not None else 0,
+    }
 
 
 def load_daily_bars(
@@ -141,9 +163,17 @@ def refresh_market_data_if_needed(
     futures_id: str,
     lookback_days: int = 365,
 ) -> list[dict]:
-    latest_date = get_latest_market_date(db_path, futures_id)
-    today = date.today().isoformat()
-    needs_refresh = latest_date is None or latest_date == today
+    bounds = get_market_date_bounds(db_path, futures_id)
+    latest_date = bounds["latest_date"]
+    earliest_date = bounds["earliest_date"]
+    target_start = date.today() - timedelta(days=lookback_days)
+    latest_available_date = get_latest_available_market_date(futures_id, lookback_days=min(lookback_days, 45))
+
+    needs_refresh = latest_date is None
+    if not has_recent_coverage(earliest_date, target_start):
+        needs_refresh = True
+    if latest_available_date and (latest_date is None or latest_date < latest_available_date):
+        needs_refresh = True
 
     if needs_refresh:
         extract_and_store_daily_data(db_path=db_path, futures_id=futures_id, lookback_days=lookback_days)
@@ -174,6 +204,39 @@ def extract_and_store_daily_data(
     if not bars:
         raise ValueError(f"未能抓取 {futures_id} 的行情数据，请检查 AkShare/Yahoo Finance 代码映射或网络。")
     return bars
+
+
+def get_latest_available_market_date(futures_id: str, lookback_days: int = 30) -> Optional[str]:
+    source_config = resolve_source_config(futures_id)
+    candidate_dates = []
+
+    akshare_bars = fetch_from_akshare(
+        futures_id=futures_id,
+        exchange=source_config["exchange"],
+        code=source_config["code"],
+        lookback_days=max(lookback_days, 10),
+    )
+    if akshare_bars:
+        candidate_dates.append(akshare_bars[-1]["date"])
+
+    yahoo_bars = fetch_from_yahoo(source_config.get("yahoo_symbol"), max(lookback_days, 10))
+    if yahoo_bars:
+        candidate_dates.append(yahoo_bars[-1]["date"])
+
+    normalized_dates = [normalize_trade_date(item) for item in candidate_dates if item]
+    return max(normalized_dates) if normalized_dates else None
+
+
+def has_recent_coverage(earliest_date: Optional[str], target_start: date, tolerance_days: int = 7) -> bool:
+    if not earliest_date:
+        return False
+
+    try:
+        earliest = date.fromisoformat(earliest_date)
+    except ValueError:
+        return False
+
+    return earliest <= target_start + timedelta(days=tolerance_days)
 
 
 def resolve_source_config(futures_id: str) -> dict:
