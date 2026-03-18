@@ -61,6 +61,7 @@ const chartColors = {
   bollLower: "#bf8b2d",
   arima: "#d9485f",
   garch: "#2a76c9",
+  multi_model_system: "#1f8f6a",
 };
 
 const MIN_ZOOM_DAYS = 30;
@@ -816,6 +817,7 @@ function drawChart(dataset) {
   const predictionColors = {
     arima: chartColors.arima,
     garch: chartColors.garch,
+    multi_model_system: chartColors.multi_model_system,
   };
 
   predictionSeries.forEach((prediction) => {
