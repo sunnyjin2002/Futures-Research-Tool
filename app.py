@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
-from data_extraction import ensure_market_data_table, load_daily_bars, refresh_market_data_if_needed
+from data_extraction import (
+    ensure_market_data_table,
+    extract_and_store_daily_data,
+    load_daily_bars,
+    refresh_market_data_if_needed,
+)
 from prediction_runner import run_prediction_job_for_record
 
 
@@ -425,6 +430,35 @@ def build_market_series(product_id: str) -> dict:
     }
 
 
+def get_market_refresh_status(product_id: str) -> dict:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                MAX(trading_date) AS latest_trading_date,
+                MAX(updated_at) AS latest_updated_at,
+                COUNT(*) AS row_count
+            FROM market_data
+            WHERE futures_id = ?
+            """,
+            (product_id,),
+        ).fetchone()
+
+    return {
+        "productId": product_id,
+        "latestTradingDate": row["latest_trading_date"] if row else None,
+        "latestUpdatedAt": row["latest_updated_at"] if row else None,
+        "rowCount": int(row["row_count"]) if row and row["row_count"] is not None else 0,
+    }
+
+
+def refresh_market_data_for_product(product_id: str, lookback_days: int = 365) -> dict:
+    bars = extract_and_store_daily_data(DB_PATH, product_id, lookback_days=lookback_days)
+    status = get_market_refresh_status(product_id)
+    status["loadedRows"] = len(bars)
+    return status
+
+
 class FuturesResearchHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -480,6 +514,7 @@ class FuturesResearchHandler(BaseHTTPRequestHandler):
                 {
                     "productId": product_id,
                     "market": build_market_series(product_id),
+                    "marketRefreshStatus": get_market_refresh_status(product_id),
                     "latestPrediction": latest,
                     "modelStatuses": model_statuses,
                 },
@@ -494,6 +529,17 @@ class FuturesResearchHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+
+        if parsed.path == "/api/market/refresh":
+            body = parse_json_body(self)
+            product_id = body.get("productId")
+            product = next((item for item in FUTURES_PRODUCTS if item["id"] == product_id), None)
+            if not product:
+                json_response(self, {"error": "参数无效，请重新选择期货产品"}, status=400)
+                return
+            result = refresh_market_data_for_product(product_id, lookback_days=365)
+            json_response(self, {"marketRefreshStatus": result})
+            return
 
         if parsed.path == "/api/database/delete":
             body = parse_json_body(self)

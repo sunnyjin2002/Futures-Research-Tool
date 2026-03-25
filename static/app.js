@@ -8,6 +8,8 @@ const state = {
   selectedIndicators: new Set(),
   selectedModelIds: new Set(),
   zoomDays: 30,
+  customWeightedVisible: false,
+  customModelWeights: {},
   databaseEditMode: false,
   databaseSelection: {
     predictions: new Set(),
@@ -21,6 +23,8 @@ const els = {
   form: document.getElementById("prediction-form"),
   productSelect: document.getElementById("product-select"),
   modelSelect: document.getElementById("model-select"),
+  refreshMarketData: document.getElementById("refresh-market-data"),
+  marketDataStatus: document.getElementById("market-data-status"),
   runButton: document.getElementById("run-button"),
   statusCard: document.getElementById("status-card"),
   statusTitle: document.getElementById("status-title"),
@@ -30,6 +34,7 @@ const els = {
   timerDisplay: document.getElementById("timer-display"),
   indicatorList: document.getElementById("indicator-list"),
   modelParameterList: document.getElementById("model-parameter-list"),
+  addCustomWeighted: document.getElementById("add-custom-weighted"),
   refreshResearch: document.getElementById("refresh-research"),
   chartStage: document.querySelector(".chart-stage"),
   chartCanvas: document.getElementById("candlestick-chart"),
@@ -62,7 +67,10 @@ const chartColors = {
   arima: "#d9485f",
   garch: "#2a76c9",
   multi_model_system: "#1f8f6a",
+  custom_weighted: "#bb6a1e",
 };
+
+const CUSTOM_WEIGHTED_MODEL_ID = "custom_weighted";
 
 const MIN_ZOOM_DAYS = 30;
 const MAX_ZOOM_DAYS = 365;
@@ -92,6 +100,19 @@ function formatUpdateTime(value) {
   return value || "尚无结果";
 }
 
+function formatMarketRefreshStatus(status) {
+  if (!status || !status.latestUpdatedAt) {
+    return "最新数据更新时间：尚未获取";
+  }
+  const latestTradingDate = status.latestTradingDate || "未知交易日";
+  return `最新数据更新时间：${status.latestUpdatedAt}，最新交易日：${latestTradingDate}`;
+}
+
+function updateMarketRefreshStatus(status, prefix = "") {
+  const base = formatMarketRefreshStatus(status);
+  els.marketDataStatus.textContent = prefix ? `${prefix}${base}` : base;
+}
+
 function clampZoomDays(value) {
   return Math.max(MIN_ZOOM_DAYS, Math.min(MAX_ZOOM_DAYS, value));
 }
@@ -106,6 +127,37 @@ function formatAxisLabel(label) {
     return label.slice(5);
   }
   return label;
+}
+
+function addCalendarDays(dateText, days) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateText)) {
+    return null;
+  }
+  const [year, month, day] = dateText.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  date.setDate(date.getDate() + days);
+  const nextYear = date.getFullYear();
+  const nextMonth = String(date.getMonth() + 1).padStart(2, "0");
+  const nextDay = String(date.getDate()).padStart(2, "0");
+  return `${nextYear}-${nextMonth}-${nextDay}`;
+}
+
+function shouldRenderPredictionAxisLabel(dayOffset) {
+  return dayOffset === 1 || dayOffset % 5 === 0;
+}
+
+function formatPredictionAxisLabel(point) {
+  const actualDate = addCalendarDays(point.sourceDate, Number(point.dayOffset || 0));
+  if (!actualDate) {
+    return {
+      dateText: point.label,
+      offsetText: "",
+    };
+  }
+  return {
+    dateText: actualDate.slice(5).replace("-", "/"),
+    offsetText: `(T+${point.dayOffset})`,
+  };
 }
 
 function setActiveTab(targetId) {
@@ -166,9 +218,167 @@ function renderIndicators(indicators) {
   });
 }
 
-function renderModelParameters(modelStatuses) {
+function getAvailableModelStatuses(dataset) {
+  if (!dataset) {
+    return [];
+  }
+  return dataset.modelStatuses || [];
+}
+
+function ensureCustomWeightDefaults(modelStatuses) {
+  modelStatuses.forEach((modelStatus) => {
+    if (!(modelStatus.id in state.customModelWeights)) {
+      state.customModelWeights[modelStatus.id] = modelStatus.prediction ? 100 : 0;
+    }
+  });
+}
+
+function updateCustomWeightedButton() {
+  if (!els.addCustomWeighted) {
+    return;
+  }
+  els.addCustomWeighted.disabled = state.customWeightedVisible;
+  els.addCustomWeighted.textContent = state.customWeightedVisible ? "已添加定制加权" : "增加定制加权";
+}
+
+function getCustomWeightedPrediction(dataset) {
+  if (!dataset || !state.customWeightedVisible) {
+    return null;
+  }
+
+  const sourceModels = getAvailableModelStatuses(dataset).filter((item) => item.prediction?.predictionPayload?.length);
+  const weightedModels = sourceModels.filter((item) => Number(state.customModelWeights[item.id] || 0) > 0);
+  if (weightedModels.length === 0) {
+    return null;
+  }
+
+  const totalWeight = weightedModels.reduce((sum, item) => sum + Number(state.customModelWeights[item.id] || 0), 0);
+  if (totalWeight <= 0) {
+    return null;
+  }
+
+  const basePrediction = weightedModels[0].prediction;
+  const payload = basePrediction.predictionPayload.map((point) => {
+    let weightedPrice = 0;
+    weightedModels.forEach((modelStatus) => {
+      const weight = Number(state.customModelWeights[modelStatus.id] || 0) / totalWeight;
+      const modelPoint = modelStatus.prediction.predictionPayload.find((item) => item.dayOffset === point.dayOffset);
+      weightedPrice += Number(modelPoint?.price || point.price) * weight;
+    });
+
+    return {
+      ...point,
+      price: Number(weightedPrice.toFixed(2)),
+      modelId: CUSTOM_WEIGHTED_MODEL_ID,
+    };
+  });
+
+  return {
+    id: `${CUSTOM_WEIGHTED_MODEL_ID}-${dataset.productId}`,
+    modelId: CUSTOM_WEIGHTED_MODEL_ID,
+    modelLabel: "定制加权",
+    createdAt: weightedModels
+      .map((item) => item.prediction.createdAt)
+      .filter(Boolean)
+      .sort()
+      .slice(-1)[0] || null,
+    completedAt: weightedModels
+      .map((item) => item.prediction.completedAt || item.prediction.createdAt)
+      .filter(Boolean)
+      .sort()
+      .slice(-1)[0] || null,
+    predictionPayload: payload,
+  };
+}
+
+function buildModelStatuses(dataset) {
+  const baseStatuses = getAvailableModelStatuses(dataset);
+  if (!state.customWeightedVisible) {
+    return baseStatuses;
+  }
+
+  const customPrediction = getCustomWeightedPrediction(dataset);
+  const totalWeight = baseStatuses.reduce((sum, item) => sum + Number(state.customModelWeights[item.id] || 0), 0);
+  const customStatus = {
+    id: CUSTOM_WEIGHTED_MODEL_ID,
+    label: "定制加权",
+    lastUpdated: customPrediction?.completedAt || null,
+    prediction: customPrediction,
+    selectionMeta:
+      totalWeight > 0 ? `权重合计：${totalWeight}%` : "请先给已有模型分配权重",
+  };
+
+  return [...baseStatuses, customStatus];
+}
+
+function renderCustomWeightCard(modelStatuses) {
+  const card = document.createElement("div");
+  card.className = "custom-weight-card";
+
+  const header = document.createElement("div");
+  header.className = "custom-weight-header";
+  const title = document.createElement("strong");
+  title.textContent = "定制加权配置";
+  const total = document.createElement("span");
+  total.className = "custom-weight-total";
+  const totalWeight = modelStatuses.reduce((sum, item) => sum + Number(state.customModelWeights[item.id] || 0), 0);
+  total.textContent = `当前合计 ${totalWeight}%`;
+  header.appendChild(title);
+  header.appendChild(total);
+  card.appendChild(header);
+
+  const grid = document.createElement("div");
+  grid.className = "custom-weight-grid";
+
+  modelStatuses.forEach((modelStatus) => {
+    const row = document.createElement("div");
+    row.className = "custom-weight-row";
+    if (!modelStatus.prediction) {
+      row.classList.add("is-disabled");
+    }
+
+    const label = document.createElement("label");
+    label.textContent = modelStatus.label;
+    row.appendChild(label);
+
+    const inputWrap = document.createElement("div");
+    inputWrap.className = "custom-weight-input-wrap";
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.max = "100";
+    input.step = "1";
+    input.value = String(state.customModelWeights[modelStatus.id] || 0);
+    input.disabled = !modelStatus.prediction;
+    input.addEventListener("input", () => {
+      const nextValue = Math.max(0, Math.min(100, Number(input.value || 0)));
+      state.customModelWeights[modelStatus.id] = nextValue;
+      if (state.researchData) {
+        renderModelParameters(state.researchData);
+        renderForecastTable(state.researchData);
+        drawChart(state.researchData);
+        updateResearchSummary(state.researchData);
+      }
+    });
+    const suffix = document.createElement("span");
+    suffix.textContent = "%";
+    inputWrap.appendChild(input);
+    inputWrap.appendChild(suffix);
+    row.appendChild(inputWrap);
+    grid.appendChild(row);
+  });
+
+  card.appendChild(grid);
+  return card;
+}
+
+function renderModelParameters(dataset) {
+  const baseModelStatuses = getAvailableModelStatuses(dataset);
+  ensureCustomWeightDefaults(baseModelStatuses);
+  updateCustomWeightedButton();
   els.modelParameterList.innerHTML = "";
   const nextSelected = new Set();
+  const modelStatuses = buildModelStatuses(dataset);
 
   modelStatuses.forEach((modelStatus, index) => {
     const wrapper = document.createElement("div");
@@ -207,7 +417,10 @@ function renderModelParameters(modelStatuses) {
     title.textContent = modelStatus.label;
     const meta = document.createElement("span");
     meta.className = "parameter-meta";
-    meta.textContent = `最后更新时间：${formatUpdateTime(modelStatus.lastUpdated)}`;
+    meta.textContent =
+      modelStatus.id === CUSTOM_WEIGHTED_MODEL_ID
+        ? modelStatus.selectionMeta || "定制组合"
+        : `最后更新时间：${formatUpdateTime(modelStatus.lastUpdated)}`;
     copy.appendChild(title);
     copy.appendChild(meta);
     main.appendChild(input);
@@ -220,6 +433,9 @@ function renderModelParameters(modelStatuses) {
     label.appendChild(side);
 
     wrapper.appendChild(label);
+    if (modelStatus.id === CUSTOM_WEIGHTED_MODEL_ID) {
+      wrapper.appendChild(renderCustomWeightCard(baseModelStatuses));
+    }
     els.modelParameterList.appendChild(wrapper);
   });
 
@@ -321,6 +537,30 @@ async function startPrediction(event) {
   }
 }
 
+async function refreshSelectedMarketData() {
+  const productId = els.productSelect.value;
+  if (!productId) {
+    return;
+  }
+
+  els.refreshMarketData.disabled = true;
+  updateMarketRefreshStatus(state.researchData?.marketRefreshStatus, "正在更新数据，");
+
+  try {
+    const data = await fetchJSON("/api/market/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ productId }),
+    });
+    updateMarketRefreshStatus(data.marketRefreshStatus, "更新完成，");
+    await loadResearch(productId);
+  } catch (error) {
+    els.marketDataStatus.textContent = `最新数据更新时间：更新失败，${error.message}`;
+  } finally {
+    els.refreshMarketData.disabled = false;
+  }
+}
+
 function pollPrediction() {
   stopPolling();
   state.pollInterval = window.setInterval(async () => {
@@ -397,7 +637,7 @@ function drawBollinger(ctx, boll, step, chartLeft, chartTop, chartBottom, min, m
 }
 
 function buildPredictionSeries(dataset) {
-  return dataset.modelStatuses
+  return buildModelStatuses(dataset)
     .filter((item) => state.selectedModelIds.has(item.id) && item.prediction?.predictionPayload?.length)
     .map((item) => item.prediction);
 }
@@ -469,7 +709,7 @@ function buildForecastSummaryRows(dataset) {
     ? dataset.market.candles[dataset.market.candles.length - 1].close
     : null;
   const checkpoints = [5, 10, 20, 30];
-  return dataset.modelStatuses.map((modelStatus) => {
+  return buildModelStatuses(dataset).map((modelStatus) => {
     const prediction = modelStatus.prediction;
     const summary = {};
 
@@ -818,6 +1058,7 @@ function drawChart(dataset) {
     arima: chartColors.arima,
     garch: chartColors.garch,
     multi_model_system: chartColors.multi_model_system,
+    custom_weighted: chartColors.custom_weighted,
   };
 
   predictionSeries.forEach((prediction) => {
@@ -848,10 +1089,21 @@ function drawChart(dataset) {
   }
 
   if (predictionSeries.length > 0) {
+    ctx.save();
+    ctx.font = '11px "PingFang SC", sans-serif';
+    ctx.textAlign = "center";
     predictionSeries[0].predictionPayload.forEach((item, index) => {
+      if (!shouldRenderPredictionAxisLabel(item.dayOffset)) {
+        return;
+      }
       const x = chartLeft + step * (candles.length + index + 1);
-      ctx.fillText(item.label, x - 10, height - 20);
+      const label = formatPredictionAxisLabel(item);
+      ctx.fillText(label.dateText, x, height - 28);
+      if (label.offsetText) {
+        ctx.fillText(label.offsetText, x, height - 14);
+      }
     });
+    ctx.restore();
   }
 }
 
@@ -893,7 +1145,8 @@ async function loadResearch(forceProductId = null) {
 
   const data = await fetchJSON(`/api/research?product=${encodeURIComponent(productId)}`);
   state.researchData = data;
-  renderModelParameters(data.modelStatuses);
+  updateMarketRefreshStatus(data.marketRefreshStatus);
+  renderModelParameters(data);
   renderForecastTable(data);
   drawChart(data);
   updateResearchSummary(data);
@@ -917,6 +1170,18 @@ async function init() {
     });
   });
   els.form.addEventListener("submit", startPrediction);
+  els.refreshMarketData.addEventListener("click", () => refreshSelectedMarketData());
+  els.addCustomWeighted.addEventListener("click", () => {
+    state.customWeightedVisible = true;
+    state.selectedModelIds.add(CUSTOM_WEIGHTED_MODEL_ID);
+    updateCustomWeightedButton();
+    if (state.researchData) {
+      renderModelParameters(state.researchData);
+      renderForecastTable(state.researchData);
+      drawChart(state.researchData);
+      updateResearchSummary(state.researchData);
+    }
+  });
   els.refreshResearch.addEventListener("click", () => loadResearch());
   els.refreshDatabase.addEventListener("click", () => loadDatabaseSnapshot());
   els.editDatabase.addEventListener("click", async () => {
@@ -956,6 +1221,7 @@ async function init() {
 
   await loadResearch();
   updateDatabaseToolbar();
+  updateCustomWeightedButton();
 }
 
 init().catch((error) => {
