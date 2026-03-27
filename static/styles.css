@@ -232,13 +232,57 @@ body {
 
 .field-data-actions {
   grid-column: 1 / -1;
-  align-items: flex-start;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.data-action-buttons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.data-action-buttons .primary-button,
+.data-action-buttons .secondary-button {
+  width: 100%;
 }
 
 .field-note {
-  margin: 10px 0 0;
+  margin: 2px 0 0;
   color: var(--muted);
   line-height: 1.55;
+  font-size: 0.82rem;
+}
+
+.field-note-error {
+  color: var(--danger);
+}
+
+.percent-input-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.percent-input-wrap input {
+  min-height: 40px;
+  width: 120px;
+  border-radius: 12px;
+  border: 1px solid rgba(34, 56, 44, 0.14);
+  background: rgba(255, 255, 255, 0.88);
+  padding: 0 12px;
+  color: var(--text);
+  font: inherit;
+}
+
+.percent-suffix {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.percent-prefix {
+  color: var(--muted);
+  font-weight: 600;
 }
 
 .primary-button,
@@ -256,7 +300,6 @@ body {
 }
 
 .primary-button {
-  grid-column: 1 / -1;
   color: #fff;
   background: linear-gradient(135deg, #1d6b57 0%, #245b80 100%);
 }

@@ -180,6 +180,36 @@ def init_db() -> None:
             conn.execute("ALTER TABLE predictions ADD COLUMN error_message TEXT")
         conn.commit()
     ensure_market_data_table(DB_PATH)
+    with get_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS market_refresh_log (
+                product_id TEXT PRIMARY KEY,
+                refreshed_at TEXT NOT NULL,
+                latest_trading_date TEXT,
+                loaded_rows INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.commit()
+
+
+def upsert_market_refresh_log(
+    product_id: str, refreshed_at: str, latest_trading_date: Optional[str], loaded_rows: int
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO market_refresh_log (product_id, refreshed_at, latest_trading_date, loaded_rows)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(product_id) DO UPDATE SET
+                refreshed_at = excluded.refreshed_at,
+                latest_trading_date = excluded.latest_trading_date,
+                loaded_rows = excluded.loaded_rows
+            """,
+            (product_id, refreshed_at, latest_trading_date, loaded_rows),
+        )
+        conn.commit()
 
 
 def json_response(handler: BaseHTTPRequestHandler, payload: dict, status: int = 200) -> None:
@@ -432,7 +462,7 @@ def build_market_series(product_id: str) -> dict:
 
 def get_market_refresh_status(product_id: str) -> dict:
     with get_connection() as conn:
-        row = conn.execute(
+        market_row = conn.execute(
             """
             SELECT
                 MAX(trading_date) AS latest_trading_date,
@@ -443,20 +473,56 @@ def get_market_refresh_status(product_id: str) -> dict:
             """,
             (product_id,),
         ).fetchone()
+        refresh_row = conn.execute(
+            """
+            SELECT refreshed_at, latest_trading_date, loaded_rows
+            FROM market_refresh_log
+            WHERE product_id = ?
+            """,
+            (product_id,),
+        ).fetchone()
+
+    latest_trading_date = market_row["latest_trading_date"] if market_row else None
+    latest_updated_at = market_row["latest_updated_at"] if market_row else None
+    row_count = int(market_row["row_count"]) if market_row and market_row["row_count"] is not None else 0
+    if refresh_row:
+        latest_updated_at = refresh_row["refreshed_at"] or latest_updated_at
+        if not latest_trading_date:
+            latest_trading_date = refresh_row["latest_trading_date"]
 
     return {
         "productId": product_id,
-        "latestTradingDate": row["latest_trading_date"] if row else None,
-        "latestUpdatedAt": row["latest_updated_at"] if row else None,
-        "rowCount": int(row["row_count"]) if row and row["row_count"] is not None else 0,
+        "latestTradingDate": latest_trading_date,
+        "latestUpdatedAt": latest_updated_at,
+        "rowCount": row_count,
     }
 
 
 def refresh_market_data_for_product(product_id: str, lookback_days: int = 365) -> dict:
+    refreshed_at = current_timestamp()
     bars = extract_and_store_daily_data(DB_PATH, product_id, lookback_days=lookback_days)
+    latest_trading_date = bars[-1]["date"] if bars else None
+    upsert_market_refresh_log(
+        product_id=product_id,
+        refreshed_at=refreshed_at,
+        latest_trading_date=latest_trading_date,
+        loaded_rows=len(bars),
+    )
     status = get_market_refresh_status(product_id)
     status["loadedRows"] = len(bars)
     return status
+
+
+def format_market_refresh_error(exc: Exception) -> str:
+    raw = str(exc).strip() or exc.__class__.__name__
+    lowered = raw.lower()
+    if "did not match the expected pattern" in lowered:
+        return "数据源返回格式异常，请稍后重试或切换其他品种"
+    if "no data fetched using yahooapiparser" in lowered:
+        return "Yahoo 数据源暂无可用行情，请稍后重试"
+    if "read timed out" in lowered or "timeout" in lowered:
+        return "数据源请求超时，请稍后重试"
+    return raw
 
 
 class FuturesResearchHandler(BaseHTTPRequestHandler):
@@ -537,7 +603,15 @@ class FuturesResearchHandler(BaseHTTPRequestHandler):
             if not product:
                 json_response(self, {"error": "参数无效，请重新选择期货产品"}, status=400)
                 return
-            result = refresh_market_data_for_product(product_id, lookback_days=365)
+            try:
+                result = refresh_market_data_for_product(product_id, lookback_days=365)
+            except Exception as exc:
+                json_response(
+                    self,
+                    {"error": f"获取期货数据失败：{format_market_refresh_error(exc)}"},
+                    status=500,
+                )
+                return
             json_response(self, {"marketRefreshStatus": result})
             return
 
