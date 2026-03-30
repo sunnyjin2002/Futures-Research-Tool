@@ -69,6 +69,8 @@ const els = {
   chartStage: document.querySelector(".chart-stage"),
   chartStageBacktest: document.querySelector("#tab-backtest .chart-stage"),
   chartCanvas: document.getElementById("candlestick-chart"),
+  macdCanvas: document.getElementById("macd-chart"),
+  kdjCanvas: document.getElementById("kdj-chart"),
   chartCanvasBacktest: document.getElementById("candlestick-chart-backtest"),
   zoomRange: document.getElementById("zoom-range"),
   zoomRangeBacktest: document.getElementById("zoom-range-backtest"),
@@ -863,6 +865,201 @@ function drawLine(ctx, points, color, width = 2, dash = []) {
   ctx.restore();
 }
 
+function calcEMA(values, period) {
+  const result = [];
+  const alpha = 2 / (period + 1);
+  let prev = null;
+  values.forEach((value, index) => {
+    if (value === null || value === undefined) {
+      result.push(null);
+      return;
+    }
+    const current = Number(value);
+    if (!Number.isFinite(current)) {
+      result.push(prev);
+      return;
+    }
+    if (prev === null || index === 0) {
+      prev = current;
+    } else {
+      prev = alpha * current + (1 - alpha) * prev;
+    }
+    result.push(prev);
+  });
+  return result;
+}
+
+function calcMACD(candles) {
+  const closes = candles.map((item) => Number(item.close));
+  const ema12 = calcEMA(closes, 12);
+  const ema26 = calcEMA(closes, 26);
+  const diff = closes.map((_, index) => {
+    const a = ema12[index];
+    const b = ema26[index];
+    if (!Number.isFinite(a) || !Number.isFinite(b)) {
+      return null;
+    }
+    return a - b;
+  });
+  const dea = calcEMA(diff.map((value) => (value === null ? 0 : value)), 9);
+  const hist = diff.map((value, index) => {
+    if (value === null || dea[index] === null) {
+      return null;
+    }
+    return (value - dea[index]) * 2;
+  });
+  return { diff, dea, hist };
+}
+
+function calcKDJ(candles, period = 9) {
+  const k = [];
+  const d = [];
+  const j = [];
+  let prevK = 50;
+  let prevD = 50;
+
+  candles.forEach((candle, index) => {
+    const start = Math.max(0, index - period + 1);
+    const window = candles.slice(start, index + 1);
+    const highN = Math.max(...window.map((item) => Number(item.high)));
+    const lowN = Math.min(...window.map((item) => Number(item.low)));
+    const close = Number(candle.close);
+    let rsv = 50;
+    if (highN !== lowN) {
+      rsv = ((close - lowN) / (highN - lowN)) * 100;
+    }
+    const currentK = (2 / 3) * prevK + (1 / 3) * rsv;
+    const currentD = (2 / 3) * prevD + (1 / 3) * currentK;
+    const currentJ = 3 * currentK - 2 * currentD;
+    k.push(currentK);
+    d.push(currentD);
+    j.push(currentJ);
+    prevK = currentK;
+    prevD = currentD;
+  });
+
+  return { k, d, j };
+}
+
+function clearSubIndicatorCharts() {
+  [els.macdCanvas, els.kdjCanvas].forEach((canvas) => {
+    if (!canvas) {
+      return;
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#f9fbf8";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  });
+}
+
+function drawMACDChart(candles) {
+  const canvas = els.macdCanvas;
+  if (!canvas) {
+    return;
+  }
+  const ctx = canvas.getContext("2d");
+  const width = canvas.width;
+  const height = canvas.height;
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#f9fbf8";
+  ctx.fillRect(0, 0, width, height);
+  if (!candles.length) {
+    return;
+  }
+
+  const { diff, dea, hist } = calcMACD(candles);
+  const values = [...diff, ...dea, ...hist].filter((value) => Number.isFinite(value));
+  const min = Math.min(...values, -0.0001);
+  const max = Math.max(...values, 0.0001);
+  const padding = { top: 10, right: 20, bottom: 18, left: 20 };
+  const chartLeft = padding.left;
+  const chartRight = width - padding.right;
+  const chartTop = padding.top;
+  const chartBottom = height - padding.bottom;
+  const step = (chartRight - chartLeft) / (candles.length + 1);
+  const zeroY = priceToY(0, min, max, chartTop, chartBottom);
+
+  ctx.strokeStyle = "rgba(29, 107, 87, 0.12)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(chartLeft, zeroY);
+  ctx.lineTo(chartRight, zeroY);
+  ctx.stroke();
+
+  hist.forEach((value, index) => {
+    if (!Number.isFinite(value)) {
+      return;
+    }
+    const x = chartLeft + step * (index + 1);
+    const y = priceToY(value, min, max, chartTop, chartBottom);
+    const top = Math.min(y, zeroY);
+    const barHeight = Math.max(1, Math.abs(y - zeroY));
+    ctx.fillStyle = value >= 0 ? "rgba(181, 72, 68, 0.6)" : "rgba(45, 121, 80, 0.6)";
+    ctx.fillRect(x - step * 0.24, top, step * 0.48, barHeight);
+  });
+
+  const diffPoints = diff.map((value, index) =>
+    Number.isFinite(value)
+      ? { x: chartLeft + step * (index + 1), y: priceToY(value, min, max, chartTop, chartBottom) }
+      : null,
+  );
+  const deaPoints = dea.map((value, index) =>
+    Number.isFinite(value)
+      ? { x: chartLeft + step * (index + 1), y: priceToY(value, min, max, chartTop, chartBottom) }
+      : null,
+  );
+  drawLine(ctx, diffPoints, "#2a76c9", 1.8);
+  drawLine(ctx, deaPoints, "#c98d3a", 1.8);
+}
+
+function drawKDJChart(candles) {
+  const canvas = els.kdjCanvas;
+  if (!canvas) {
+    return;
+  }
+  const ctx = canvas.getContext("2d");
+  const width = canvas.width;
+  const height = canvas.height;
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#f9fbf8";
+  ctx.fillRect(0, 0, width, height);
+  if (!candles.length) {
+    return;
+  }
+
+  const { k, d, j } = calcKDJ(candles);
+  const values = [...k, ...d, ...j].filter((value) => Number.isFinite(value));
+  const min = Math.min(...values, 0);
+  const max = Math.max(...values, 100);
+  const padding = { top: 10, right: 20, bottom: 18, left: 20 };
+  const chartLeft = padding.left;
+  const chartRight = width - padding.right;
+  const chartTop = padding.top;
+  const chartBottom = height - padding.bottom;
+  const step = (chartRight - chartLeft) / (candles.length + 1);
+
+  [20, 50, 80].forEach((level) => {
+    const y = priceToY(level, min, max, chartTop, chartBottom);
+    ctx.strokeStyle = "rgba(29, 107, 87, 0.10)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(chartLeft, y);
+    ctx.lineTo(chartRight, y);
+    ctx.stroke();
+  });
+
+  const makePoints = (series) =>
+    series.map((value, index) =>
+      Number.isFinite(value)
+        ? { x: chartLeft + step * (index + 1), y: priceToY(value, min, max, chartTop, chartBottom) }
+        : null,
+    );
+  drawLine(ctx, makePoints(k), "#2a76c9", 1.8);
+  drawLine(ctx, makePoints(d), "#c98d3a", 1.8);
+  drawLine(ctx, makePoints(j), "#d9485f", 1.8);
+}
+
 function drawBollinger(ctx, boll, step, chartLeft, chartTop, chartBottom, min, max) {
   const configs = [
     { key: "upper", color: "#bf8b2d", dash: [6, 4] },
@@ -1222,6 +1419,7 @@ function drawChart(dataset) {
   ctx.fillRect(0, 0, width, height);
 
   if (candles.length === 0) {
+    clearSubIndicatorCharts();
     return;
   }
 
@@ -1352,6 +1550,9 @@ function drawChart(dataset) {
     });
     ctx.restore();
   }
+
+  drawMACDChart(candles);
+  drawKDJChart(candles);
 }
 
 function getBacktestVisibleMarket(dataset) {
