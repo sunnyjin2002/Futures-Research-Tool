@@ -953,7 +953,7 @@ function clearSubIndicatorCharts() {
   });
 }
 
-function drawMACDChart(candles) {
+function drawMACDChart(candles, macdData) {
   const canvas = els.macdCanvas;
   if (!canvas) {
     return;
@@ -968,8 +968,13 @@ function drawMACDChart(candles) {
     return;
   }
 
-  const { diff, dea, hist } = calcMACD(candles);
+  const diff = macdData?.diff || [];
+  const dea = macdData?.dea || [];
+  const hist = macdData?.hist || [];
   const values = [...diff, ...dea, ...hist].filter((value) => Number.isFinite(value));
+  if (values.length === 0) {
+    return;
+  }
   const min = Math.min(...values, -0.0001);
   const max = Math.max(...values, 0.0001);
   const padding = { top: 10, right: 20, bottom: 18, left: 20 };
@@ -1013,7 +1018,7 @@ function drawMACDChart(candles) {
   drawLine(ctx, deaPoints, "#c98d3a", 1.8);
 }
 
-function drawKDJChart(candles) {
+function drawKDJChart(candles, kdjData) {
   const canvas = els.kdjCanvas;
   if (!canvas) {
     return;
@@ -1028,8 +1033,13 @@ function drawKDJChart(candles) {
     return;
   }
 
-  const { k, d, j } = calcKDJ(candles);
+  const k = kdjData?.k || [];
+  const d = kdjData?.d || [];
+  const j = kdjData?.j || [];
   const values = [...k, ...d, ...j].filter((value) => Number.isFinite(value));
+  if (values.length === 0) {
+    return;
+  }
   const min = Math.min(...values, 0);
   const max = Math.max(...values, 100);
   const padding = { top: 10, right: 20, bottom: 18, left: 20 };
@@ -1086,6 +1096,48 @@ function buildPredictionSeries(dataset) {
     .map((item) => item.prediction);
 }
 
+function isIsoDateText(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+}
+
+function getActualPredictionDate(point) {
+  const sourceDate = point?.sourceDate;
+  const dayOffset = Number(point?.dayOffset || 0);
+  if (!isIsoDateText(sourceDate) || !Number.isFinite(dayOffset) || dayOffset <= 0) {
+    return null;
+  }
+  return addCalendarDays(sourceDate, dayOffset);
+}
+
+function filterExpiredPredictionPayload(prediction, latestMarketDate) {
+  if (!prediction?.predictionPayload?.length) {
+    return [];
+  }
+  if (!isIsoDateText(latestMarketDate)) {
+    return prediction.predictionPayload;
+  }
+  return prediction.predictionPayload.filter((point) => {
+    const actualDate = getActualPredictionDate(point);
+    if (!actualDate) {
+      return true;
+    }
+    return actualDate > latestMarketDate;
+  });
+}
+
+function buildVisiblePredictionSeries(dataset, candles, predictionSeries) {
+  const latestMarketDate = candles.length ? candles[candles.length - 1].label : null;
+  return predictionSeries
+    .map((prediction) => {
+      const visiblePayload = filterExpiredPredictionPayload(prediction, latestMarketDate);
+      return {
+        ...prediction,
+        predictionPayload: visiblePayload,
+      };
+    })
+    .filter((prediction) => prediction.predictionPayload.length > 0);
+}
+
 function getVisibleMarket(dataset) {
   const windowSize = clampZoomDays(state.zoomDays);
   const candles = dataset.market.candles.slice(-windowSize);
@@ -1098,6 +1150,16 @@ function getVisibleMarket(dataset) {
       upper: dataset.market.indicators.boll.upper.slice(startIndex),
       middle: dataset.market.indicators.boll.middle.slice(startIndex),
       lower: dataset.market.indicators.boll.lower.slice(startIndex),
+    },
+    macd: {
+      diff: dataset.market.indicators.macd.diff.slice(startIndex),
+      dea: dataset.market.indicators.macd.dea.slice(startIndex),
+      hist: dataset.market.indicators.macd.hist.slice(startIndex),
+    },
+    kdj: {
+      k: dataset.market.indicators.kdj.k.slice(startIndex),
+      d: dataset.market.indicators.kdj.d.slice(startIndex),
+      j: dataset.market.indicators.kdj.j.slice(startIndex),
     },
   };
   return { candles, indicators };
@@ -1410,7 +1472,8 @@ function drawChart(dataset) {
   const ctx = canvas.getContext("2d");
   const { candles, indicators } = getVisibleMarket(dataset);
   const predictionSeries = buildPredictionSeries(dataset);
-  renderLegend(dataset, predictionSeries);
+  const visiblePredictionSeries = buildVisiblePredictionSeries(dataset, candles, predictionSeries);
+  renderLegend(dataset, visiblePredictionSeries);
 
   const width = canvas.width;
   const height = canvas.height;
@@ -1424,7 +1487,7 @@ function drawChart(dataset) {
   }
 
   const allPrices = candles.flatMap((item) => [item.high, item.low]);
-  predictionSeries.forEach((prediction) => {
+  visiblePredictionSeries.forEach((prediction) => {
     prediction.predictionPayload.forEach((item) => allPrices.push(item.price));
   });
   const { min, max } = calcMinMax(allPrices);
@@ -1435,7 +1498,7 @@ function drawChart(dataset) {
   const chartTop = padding.top;
   const chartBottom = height - padding.bottom;
   const candleAreaWidth = chartRight - chartLeft;
-  const maxPredictionLength = predictionSeries.reduce(
+  const maxPredictionLength = visiblePredictionSeries.reduce(
     (maxLength, prediction) => Math.max(maxLength, prediction.predictionPayload.length),
     0,
   );
@@ -1506,7 +1569,7 @@ function drawChart(dataset) {
     custom_weighted: chartColors.custom_weighted,
   };
 
-  predictionSeries.forEach((prediction) => {
+  visiblePredictionSeries.forEach((prediction) => {
     const color = predictionColors[prediction.modelId] || "#d9485f";
     const predictionPoints = prediction.predictionPayload.map((item, index) => ({
       x: chartLeft + step * (candles.length + index + 1),
@@ -1533,11 +1596,11 @@ function drawChart(dataset) {
     ctx.fillText(label, x - 18, height - 20);
   }
 
-  if (predictionSeries.length > 0) {
+  if (visiblePredictionSeries.length > 0) {
     ctx.save();
     ctx.font = '11px "PingFang SC", sans-serif';
     ctx.textAlign = "center";
-    predictionSeries[0].predictionPayload.forEach((item, index) => {
+    visiblePredictionSeries[0].predictionPayload.forEach((item, index) => {
       if (!shouldRenderPredictionAxisLabel(item.dayOffset)) {
         return;
       }
@@ -1551,8 +1614,8 @@ function drawChart(dataset) {
     ctx.restore();
   }
 
-  drawMACDChart(candles);
-  drawKDJChart(candles);
+  drawMACDChart(candles, indicators.macd);
+  drawKDJChart(candles, indicators.kdj);
 }
 
 function getBacktestVisibleMarket(dataset) {

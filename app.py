@@ -183,6 +183,29 @@ def init_db() -> None:
     with get_connection() as conn:
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS market_indicators (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                futures_id TEXT NOT NULL,
+                trading_date TEXT NOT NULL,
+                ma5 REAL,
+                ma10 REAL,
+                ma20 REAL,
+                boll_upper REAL,
+                boll_middle REAL,
+                boll_lower REAL,
+                macd_diff REAL,
+                macd_dea REAL,
+                macd_hist REAL,
+                kdj_k REAL,
+                kdj_d REAL,
+                kdj_j REAL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(futures_id, trading_date)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS market_refresh_log (
                 product_id TEXT PRIMARY KEY,
                 refreshed_at TEXT NOT NULL,
@@ -387,6 +410,182 @@ def build_bollinger_bands(values: list, window: int = 20, deviation: float = 2.0
     return {"middle": middle, "upper": upper, "lower": lower}
 
 
+def exponential_moving_average(values: list[Optional[float]], period: int) -> list[Optional[float]]:
+    alpha = 2 / (period + 1)
+    series: list[Optional[float]] = []
+    prev: Optional[float] = None
+    for index, value in enumerate(values):
+        if value is None:
+            series.append(None)
+            continue
+        current = float(value)
+        if prev is None or index == 0:
+            prev = current
+        else:
+            prev = alpha * current + (1 - alpha) * prev
+        series.append(round(prev, 6))
+    return series
+
+
+def build_macd(values: list[float]) -> dict:
+    ema12 = exponential_moving_average(values, 12)
+    ema26 = exponential_moving_average(values, 26)
+    diff: list[Optional[float]] = []
+    for fast, slow in zip(ema12, ema26):
+        if fast is None or slow is None:
+            diff.append(None)
+            continue
+        diff.append(round(fast - slow, 6))
+    dea = exponential_moving_average([item if item is not None else 0.0 for item in diff], 9)
+    hist: list[Optional[float]] = []
+    for value, signal in zip(diff, dea):
+        if value is None or signal is None:
+            hist.append(None)
+            continue
+        hist.append(round((value - signal) * 2, 6))
+    return {"diff": diff, "dea": dea, "hist": hist}
+
+
+def build_kdj(highs: list[float], lows: list[float], closes: list[float], period: int = 9) -> dict:
+    k: list[Optional[float]] = []
+    d: list[Optional[float]] = []
+    j: list[Optional[float]] = []
+    prev_k = 50.0
+    prev_d = 50.0
+
+    for index in range(len(closes)):
+        start = max(0, index - period + 1)
+        window_high = max(highs[start : index + 1])
+        window_low = min(lows[start : index + 1])
+        close = closes[index]
+        rsv = 50.0
+        if window_high != window_low:
+            rsv = ((close - window_low) / (window_high - window_low)) * 100
+        current_k = (2 / 3) * prev_k + (1 / 3) * rsv
+        current_d = (2 / 3) * prev_d + (1 / 3) * current_k
+        current_j = 3 * current_k - 2 * current_d
+        k.append(round(current_k, 6))
+        d.append(round(current_d, 6))
+        j.append(round(current_j, 6))
+        prev_k = current_k
+        prev_d = current_d
+
+    return {"k": k, "d": d, "j": j}
+
+
+def build_market_indicators_from_candles(candles: list[dict]) -> dict:
+    closes = [float(item["close"]) for item in candles]
+    highs = [float(item["high"]) for item in candles]
+    lows = [float(item["low"]) for item in candles]
+    return {
+        "ma5": moving_average(closes, 5),
+        "ma10": moving_average(closes, 10),
+        "ma20": moving_average(closes, 20),
+        "boll": build_bollinger_bands(closes, 20, 2.0),
+        "macd": build_macd(closes),
+        "kdj": build_kdj(highs, lows, closes, 9),
+    }
+
+
+def upsert_market_indicators(product_id: str, candles: list[dict], indicators: dict) -> None:
+    if not candles:
+        return
+    now = current_timestamp()
+    with get_connection() as conn:
+        for index, candle in enumerate(candles):
+            conn.execute(
+                """
+                INSERT INTO market_indicators (
+                    futures_id, trading_date, ma5, ma10, ma20,
+                    boll_upper, boll_middle, boll_lower,
+                    macd_diff, macd_dea, macd_hist,
+                    kdj_k, kdj_d, kdj_j, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(futures_id, trading_date) DO UPDATE SET
+                    ma5 = excluded.ma5,
+                    ma10 = excluded.ma10,
+                    ma20 = excluded.ma20,
+                    boll_upper = excluded.boll_upper,
+                    boll_middle = excluded.boll_middle,
+                    boll_lower = excluded.boll_lower,
+                    macd_diff = excluded.macd_diff,
+                    macd_dea = excluded.macd_dea,
+                    macd_hist = excluded.macd_hist,
+                    kdj_k = excluded.kdj_k,
+                    kdj_d = excluded.kdj_d,
+                    kdj_j = excluded.kdj_j,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    product_id,
+                    candle["label"],
+                    indicators["ma5"][index],
+                    indicators["ma10"][index],
+                    indicators["ma20"][index],
+                    indicators["boll"]["upper"][index],
+                    indicators["boll"]["middle"][index],
+                    indicators["boll"]["lower"][index],
+                    indicators["macd"]["diff"][index],
+                    indicators["macd"]["dea"][index],
+                    indicators["macd"]["hist"][index],
+                    indicators["kdj"]["k"][index],
+                    indicators["kdj"]["d"][index],
+                    indicators["kdj"]["j"][index],
+                    now,
+                ),
+            )
+        conn.commit()
+
+
+def load_market_indicators(product_id: str, trading_dates: list[str]) -> Optional[dict]:
+    if not trading_dates:
+        return None
+    placeholders = ", ".join("?" for _ in trading_dates)
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM market_indicators
+            WHERE futures_id = ? AND trading_date IN ({placeholders})
+            """,
+            (product_id, *trading_dates),
+        ).fetchall()
+
+    if len(rows) != len(trading_dates):
+        return None
+
+    row_map = {row["trading_date"]: row for row in rows}
+    ordered_rows = [row_map.get(date) for date in trading_dates]
+    if any(row is None for row in ordered_rows):
+        return None
+
+    def to_float_or_none(value) -> Optional[float]:
+        if value is None:
+            return None
+        return float(value)
+
+    return {
+        "ma5": [to_float_or_none(row["ma5"]) for row in ordered_rows],
+        "ma10": [to_float_or_none(row["ma10"]) for row in ordered_rows],
+        "ma20": [to_float_or_none(row["ma20"]) for row in ordered_rows],
+        "boll": {
+            "upper": [to_float_or_none(row["boll_upper"]) for row in ordered_rows],
+            "middle": [to_float_or_none(row["boll_middle"]) for row in ordered_rows],
+            "lower": [to_float_or_none(row["boll_lower"]) for row in ordered_rows],
+        },
+        "macd": {
+            "diff": [to_float_or_none(row["macd_diff"]) for row in ordered_rows],
+            "dea": [to_float_or_none(row["macd_dea"]) for row in ordered_rows],
+            "hist": [to_float_or_none(row["macd_hist"]) for row in ordered_rows],
+        },
+        "kdj": {
+            "k": [to_float_or_none(row["kdj_k"]) for row in ordered_rows],
+            "d": [to_float_or_none(row["kdj_d"]) for row in ordered_rows],
+            "j": [to_float_or_none(row["kdj_j"]) for row in ordered_rows],
+        },
+    }
+
+
 def build_model_statuses(product_id: str) -> list:
     with get_connection() as conn:
         rows = conn.execute(
@@ -438,15 +637,14 @@ def build_market_series(product_id: str) -> dict:
             }
             for bar in cached_bars
         ]
-        visible_closes = [item["close"] for item in candles]
+        trading_dates = [item["label"] for item in candles]
+        indicators = load_market_indicators(product_id, trading_dates)
+        if indicators is None:
+            indicators = build_market_indicators_from_candles(candles)
+            upsert_market_indicators(product_id, candles, indicators)
         return {
             "candles": candles,
-            "indicators": {
-                "ma5": moving_average(visible_closes, 5),
-                "ma10": moving_average(visible_closes, 10),
-                "ma20": moving_average(visible_closes, 20),
-                "boll": build_bollinger_bands(visible_closes, 20, 2.0),
-            },
+            "indicators": indicators,
         }
 
     return {
@@ -456,6 +654,8 @@ def build_market_series(product_id: str) -> dict:
             "ma10": [],
             "ma20": [],
             "boll": {"middle": [], "upper": [], "lower": []},
+            "macd": {"diff": [], "dea": [], "hist": []},
+            "kdj": {"k": [], "d": [], "j": []},
         },
     }
 
