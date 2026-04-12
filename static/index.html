@@ -23,8 +23,9 @@
       </header>
 
       <nav class="tabs" aria-label="页面切换">
-        <button class="tab is-active" data-tab-target="tab-workspace">建模研究页面</button>
-        <button class="tab" data-tab-target="tab-backtest">回测页面</button>
+        <button class="tab is-active" data-tab-target="tab-workspace">日线中长期研究</button>
+        <button class="tab" data-tab-target="tab-backtest">日线级回测</button>
+        <button class="tab" data-tab-target="tab-minute">分钟线买卖研究与回测</button>
         <button class="tab" data-tab-target="tab-database">数据库页面</button>
       </nav>
 
@@ -402,6 +403,139 @@
             </div>
 
             <button id="refresh-research-backtest" class="secondary-button" type="button">刷新研究视图</button>
+          </aside>
+        </section>
+      </section>
+
+      <section id="tab-minute" class="tab-page">
+        <section id="minute-page" class="workspace-page">
+          <div class="panel panel-form">
+            <div class="panel-head">
+              <div>
+                <p class="panel-kicker">分钟线工作台</p>
+                <h2>分钟线买卖研究与回测</h2>
+              </div>
+            </div>
+
+            <form id="prediction-form-minute" class="form-grid">
+              <label class="field">
+                <span>期货产品</span>
+                <select id="product-select-minute" name="productId" required></select>
+              </label>
+
+              <label class="field">
+                <span>模型</span>
+                <select id="model-select-minute" name="modelId" required>
+                  <option value="multi_model_system">多模型综合系统</option>
+                </select>
+              </label>
+
+              <div class="field field-summary">
+                <span>说明</span>
+                <p>该页面用于分钟线级别的买卖研究与回测，页面结构与日线级回测保持一致。</p>
+                <p>模型选项默认仅保留“多模型综合系统”。</p>
+              </div>
+
+              <div class="field field-data-actions">
+                <div class="data-action-buttons">
+                  <button id="refresh-market-data-minute" class="secondary-button" type="button">获取期货最新数据</button>
+                  <button id="run-button-minute" class="primary-button" type="submit">启动预测任务</button>
+                </div>
+                <p id="market-data-status-minute" class="field-note">最新数据更新时间：尚未获取</p>
+              </div>
+            </form>
+          </div>
+
+          <div class="panel panel-status">
+            <div class="panel-head">
+              <div>
+                <p class="panel-kicker">任务状态</p>
+                <h2>模型运行反馈</h2>
+              </div>
+            </div>
+
+            <div id="status-card-minute" class="status-card idle">
+              <p id="status-title-minute" class="status-title">等待启动模型任务</p>
+              <p id="status-detail-minute" class="status-detail">请选择期货产品与模型，然后启动预测任务。预测完成后可在研究区查看结果。</p>
+              <div class="status-metrics">
+                <div>
+                  <span class="metric-label">当前任务</span>
+                  <strong id="task-id-minute">-</strong>
+                </div>
+                <div>
+                  <span class="metric-label">创建时间</span>
+                  <strong id="created-at-minute">-</strong>
+                </div>
+                <div>
+                  <span class="metric-label">运行计时</span>
+                  <strong id="timer-display-minute">00:00</strong>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="research-layout">
+          <div class="panel panel-chart">
+            <div class="panel-head">
+              <div>
+                <p class="panel-kicker">研究区</p>
+                <h2>分钟线 K 线与技术指标</h2>
+              </div>
+              <div class="chart-badge" id="chart-badge-minute">等待行情数据</div>
+            </div>
+
+            <div class="chart-toolbar">
+              <div class="zoom-control">
+                <label for="zoom-range-minute">展示区间</label>
+                <input id="zoom-range-minute" type="range" min="30" max="365" step="5" value="30" />
+                <div class="zoom-meta">
+                  <span>近 30 条</span>
+                  <strong id="zoom-value-minute">30 条</strong>
+                  <span>近 365 条</span>
+                </div>
+              </div>
+              <div id="chart-legend-minute" class="chart-legend" aria-label="图例"></div>
+            </div>
+
+            <div class="chart-stage">
+              <canvas id="candlestick-chart-minute" width="940" height="460" aria-label="分钟线图"></canvas>
+            </div>
+
+            <div class="chart-footer">
+              <div>
+                <span class="metric-label">当前研究对象</span>
+                <strong id="research-product-minute">-</strong>
+              </div>
+              <div>
+                <span class="metric-label">最近时间</span>
+                <strong id="research-time-minute">-</strong>
+              </div>
+              <div>
+                <span class="metric-label">已选模型</span>
+                <strong id="research-model-minute">多模型综合系统</strong>
+              </div>
+            </div>
+          </div>
+
+          <aside class="panel panel-controls">
+            <div class="panel-head">
+              <div>
+                <p class="panel-kicker">参数区</p>
+                <h2>图表参数</h2>
+              </div>
+            </div>
+
+            <p class="control-hint">滚动列表支持多选。技术指标会直接叠加到 K 线图。</p>
+
+            <div class="parameter-scroll">
+              <div class="indicator-group">
+                <p class="control-title">技术指标</p>
+                <div id="indicator-list-minute" class="parameter-list"></div>
+              </div>
+            </div>
+
+            <button id="refresh-research-minute" class="secondary-button" type="button">刷新研究视图</button>
           </aside>
         </section>
       </section>
